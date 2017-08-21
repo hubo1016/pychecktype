@@ -1,13 +1,6 @@
 pychecktype
 ===========
 
-.. image:: https://readthedocs.org/projects/pychecktype/badge/?version=latest
-   :target: http://pychecktype.readthedocs.io/en/latest/?badge=latest
-   :alt: Documentation Status
-.. image:: https://img.shields.io/pypi/v/pychecktype.svg
-   :target: https://pypi.python.org/pypi/pychecktype
-   :alt: PyPI
-
 A type-checker which can process recursive types and data
 
 Install
@@ -152,8 +145,6 @@ b. When dict contains key-value pairs, they become restricts to the
    ``'~': NoMatch`` to disable extra keys.
 
    Examples:
-
-   ::
 
        `{"abc": int}` matches `{"abc": 1}` and `{"abc": 1, "d": 2}` but not `{"d": 2}`
 

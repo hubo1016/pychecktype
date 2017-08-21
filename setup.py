@@ -4,12 +4,7 @@ from setuptools import setup
 
 version = "1.0"
 
-try:
-    import pypandoc
-    long_description = pypandoc.convert('README.md', 'rst')
-except (IOError, ImportError):
-    long_description = ""
-
+long_description = open('README.rst', 'r').read()
 
 setup(
     name="pychecktype",
