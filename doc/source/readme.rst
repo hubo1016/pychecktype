@@ -169,3 +169,54 @@ b. When dict contains key-value pairs, they become restricts to the
    a regular expression etc.
 
 See docstring in pychecktype.py for details.
+
+
+Python 3 Annotation Checks
+--------------------------
+
+You may use `pychecktype.checked.checked` decorator to check input parameters and return values of a function
+
+.. code:: python
+
+    from pychecktype.checked import checked
+    @checked
+    def f(a: str, b: int)->str:
+        """
+        check `a` is str, `b` is int, and returns str
+        """
+        return a + str(b)
+    
+    @checked
+    def f2(a, b: int):
+        """
+        You may check only part of the parameters.
+        """
+        return str(a) + str(b)
+    
+    @checked
+    async def f3(a: str, *args: [int], **kwargs: {'?join': bool})->str:
+        """
+        Async functions are decorated to async functions
+        
+        *args , keyword-only arguments and **kwargs can also be checked
+        """
+        if kwargs.get('join'):
+            return a.join(str(v) for v in args)
+        else:
+            return a + str(sum(args))
+
+    from functools import wraps
+    def testdecorator(f):
+        @wraps
+        def _f(*args, **kwargs):
+            print("Wrapped")
+            return f(*args, **kwargs)
+    
+    @checked
+    @testdecorator
+    def f4(a: int):
+        """
+        Works well with decorators that are correctly using `functools.wraps`
+        and not modifying the argument list
+        """
+        return a + 1
