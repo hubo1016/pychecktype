@@ -2,6 +2,11 @@
 from __future__ import print_function
 import re
 
+try:
+    from reprlib import recursive_repr
+except Exception:
+    recursive_repr = lambda: lambda x: x
+    
 class TypeMismatchException(Exception):
     def __init__(self, value, type_, info = None):
         Exception.__init__(self, repr(value) + " cannot match type " \
@@ -569,11 +574,11 @@ length mismatch
         >>> l = []
         >>> l.append(l)
         >>> check_type(l, tuple_type) \\
-        ... # By default, a direct recursive is not allowed
+        ... # By default, a direct recursive is not allowed # doctest: +ELLIPSIS
         Traceback (most recent call last):
             ...
         TypeMismatchException: [[...]] cannot match type \
-tuple_([tuple_([...])])
+tuple_([...])
         >>> t = []
         >>> tuple_type = tuple_()
         >>> t.append([tuple_type])
@@ -616,6 +621,7 @@ and return list instead of tuple
         self.allowed_type = allowed_type
         self.allow_recursive = allow_recursive
         
+    @recursive_repr()
     def __repr__(self):
         return "tuple_(" + repr(self.type_) + ")"
 
@@ -695,6 +701,7 @@ map_(<... 'int'>, <... 'str'>): allowed types are: <... 'dict'>
         )
         return current_result
     
+    @recursive_repr()
     def __repr__(self):
         return "map_(" + repr(self.key_type) + ", " + \
                 repr(self.value_type) + ")"
@@ -745,7 +752,7 @@ precreate and merge must be used together
         Traceback (most recent call last):
             ...
         TypeMismatchException: ('a',) cannot match type \
-extra(tuple_((<... 'str'>, [extra(tuple_((...)))]))): \
+extra(tuple_((<... 'str'>, [...]))): \
 check_before returns False
         >>> check_type(("a",[],123), e_t) == \\
         ... {'name': 'a', 'children': [], 'childcount': 0}
@@ -849,6 +856,7 @@ check_before returns False
         else:
             return r
     
+    @recursive_repr()
     def __repr__(self):
         return "extra(" + repr(self.basictype) + ")"
 
@@ -1050,12 +1058,66 @@ check returns False
             self._modify(current_result)
         return current_result
         
+    @recursive_repr()
     def __repr__(self):
         return 'class_(' + repr(self.object_type) + ', ' + \
                 repr(self.property_check) + ')'
 
         
 class_ = ObjectChecker
+
+
+class TypeChecker(ExtraChecker):
+    """
+    Check an input variable is a class, and (optionally)
+    a subclass of `baseclass`, and (optionally) has a metaclass
+    of `metaclass`.
+    
+    Examples::
+        
+        >>> t = type_(int)
+        >>> t # doctest: +ELLIPSIS
+        type_(<... 'int'>)
+        >>> check_type(bool, t) # doctest: +ELLIPSIS
+        <... 'bool'>
+        >>> check_type(str, t) # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+          ...
+        TypeMismatchException: <... 'str'> cannot match type type_(<... 'int'>): must be a subclass of <... 'int'>
+    """
+    def _check(self, value):
+        if not issubclass(value, self._baseclass):
+            raise TypeMismatchException(value, self, "must be a subclass of " + repr(self._baseclass))
+        return True
+
+    def bind(self, baseclass=None, metaclass=type):
+        """
+        :param baseclass: if not None, check the input is a subclass of `baseclass`
+        
+        :param metaclass: if not None, check the input is an instance of `metaclass`
+        """
+        self._metaclass = metaclass
+        self._baseclass = baseclass
+        if not isinstance(metaclass, type):
+            raise InvalidTypeException(self, repr(metaclass) + " is not a metaclass")
+        if baseclass is None:
+            ExtraChecker.bind(self, metaclass)
+        else:
+            if not isinstance(baseclass, type):
+                raise InvalidTypeException(self, repr(metaclass) + " is not a baseclass")
+            ExtraChecker.bind(self, metaclass, check=self._check)
+
+    def __repr__(self):
+        return "type_(" +  ("" if self._baseclass is None else repr(self._baseclass)) + \
+                 ("" if self._metaclass is type else "metaclass=" + repr(self._metaclass)) + ")"
+
+
+def type_(baseclass=None, metaclass=type):
+    """
+    Create a TypeChecker
+    """
+    return TypeChecker(baseclass, metaclass)
+
 
 def _check_type_inner(value, type_, _recursive_check = None):
     # print('Check type:', value, id(value), type_, id(type_))
