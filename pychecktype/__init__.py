@@ -1123,7 +1123,10 @@ def _check_type_inner(value, type_, _recursive_check = None):
     # print('Check type:', value, id(value), type_, id(type_))
     if _recursive_check is None:
         # current, succeeded, failed, listloop
-        _recursive_check = ({}, {}, {}, set())
+        # each has id-tuple as their key, and (result, value, type_) as the value.
+        # we must store the used value ans types to prevent them from being collected,
+        # or the ids may be reused
+        _recursive_check = ({}, {}, {}, {})
     current_check, succeded_check, failed_check, list_loop = \
             _recursive_check
     # Use (id(value), id(type)) to store matches that are done before
@@ -1132,16 +1135,16 @@ def _check_type_inner(value, type_, _recursive_check = None):
         # This match is already done, return the result
         # print('Hit succedded cache:', succeded_check[check_id],
         #    id(succeeded_check[check_id]))
-        return succeded_check[check_id]
+        return succeded_check[check_id][0]
     elif check_id in failed_check:
         # This match is already failed, raise the exception
-        raise failed_check[check_id]
+        raise failed_check[check_id][0]
     elif check_id in current_check:
         # print('Hit succedded cache:', current_check[check_id],
         #    id(current_check[check_id]))
         # This match is in-operation. The final result is depended by
         # itself. Return the object itself to form a recursive structure.
-        return current_check[check_id]
+        return current_check[check_id][0]
     return_value = None
     def _customized_check(checker):
         if check_id in list_loop:
@@ -1149,7 +1152,7 @@ def _check_type_inner(value, type_, _recursive_check = None):
         current_result = checker.pre_check_type(value)
         if current_result is None:
             # Prevent an infinite loop
-            list_loop.add(check_id)
+            list_loop[check_id] = (value, type_)
             try:
                 current_result = checker.final_check_type(
                                     value,
@@ -1159,13 +1162,13 @@ def _check_type_inner(value, type_, _recursive_check = None):
                                             value, type, _recursive_check)
                                  )
             finally:
-                list_loop.discard(check_id)
+                del list_loop[check_id]
         else:
-            current_check[check_id] = current_result
+            current_check[check_id] = (current_result, value, type_)
             # backup succedded check: it may depends on current result.
             # If the type match fails, revert all succeeded check
             _new_recursive_check = (current_check, dict(succeded_check),
-                failed_check, set())
+                failed_check, {})
             checker.final_check_type(
                 value,
                 current_result,
@@ -1232,7 +1235,7 @@ def _check_type_inner(value, type_, _recursive_check = None):
             raise InvalidTypeException(type_, "Unrecognized type")
     except Exception as exc:
         # This match fails, store the exception
-        failed_check[check_id] = exc
+        failed_check[check_id] = (exc, value, type_)
         if check_id in current_check:
             del current_check[check_id]
         raise
@@ -1241,7 +1244,7 @@ def _check_type_inner(value, type_, _recursive_check = None):
         if check_id in current_check:
             del current_check[check_id]
             # Only store the succeded_check if necessary. 
-            succeded_check[check_id] = return_value
+            succeded_check[check_id] = (return_value, value, type_)
         return return_value
 
 if __name__ == '__main__':
