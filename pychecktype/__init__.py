@@ -489,6 +489,20 @@ class DictChecker(CustomizedChecker):
         self.type_ = type_
         self.allowed_type = allowed_type
         self.created_type = created_type
+        self.required_keys = dict((k[1:]
+                                  if isinstance(k, str)
+                                      and k.startswith('!')
+                                  else k, v)
+                                  for k,v in self.type_.items()
+                                  if not isinstance(k, str)
+                                  or (not k.startswith('?')
+                                    and not k.startswith('~')))
+        self.optional_keys = dict((k[1:], v) for k, v in self.type_.items()
+                                  if k.startswith('?'))
+        self.optional_keys.update(self.required_keys)
+        self.regexp_keys = [(k[1:], v) for k, v in self.type_.items()
+                            if k.startswith('~')]
+
         
     def pre_check_type(self, value):
         if not isinstance(value, self.allowed_type):
@@ -500,30 +514,18 @@ class DictChecker(CustomizedChecker):
         if not self.type_:
             current_result.update(value)
         else:
-            required_keys = dict((k[1:]
-                                  if isinstance(k, str)
-                                      and k.startswith('!')
-                                  else k, v)
-                                  for k,v in self.type_.items()
-                                  if not isinstance(k, str)
-                                  or (not k.startswith('?')
-                                    and not k.startswith('~')))
-            optional_keys = dict((k[1:], v) for k, v in self.type_.items()
-                             if k.startswith('?'))
-            regexp_keys = [(k[1:], v) for k, v in self.type_.items()
-                           if k.startswith('~')]
             # check required keys
-            for k in required_keys:
+            for k in self.required_keys:
                 if k not in value:
                     raise TypeMismatchException(value, self.type_, 'key '
                         + repr(k) + ' is required')
-            optional_keys.update(required_keys)
+            optional_keys = self.optional_keys
             for k, v in value.items():
                 if k in optional_keys:
                     current_result[k] = recursive_check_type(v,
                             optional_keys[k])
                 else:
-                    for rk, rv in regexp_keys:
+                    for rk, rv in self.regexp_keys:
                         if re.search(rk, k):
                             current_result[k] = recursive_check_type(v, rv)
                             break
@@ -1119,23 +1121,121 @@ def type_(baseclass=None, metaclass=type):
     return TypeChecker(baseclass, metaclass)
 
 
-def _check_type_inner(value, type_, _recursive_check = None):
+class _StackedDict(object):
+    __slots__ = ('_check', '_check_stack')
+    def __init__(self, *args, **kwargs):
+        self._check = [dict(*args, **kwargs)]
+        self._check_stack = []
+    
+    def __contains__(self, key):
+        return any(key in d for d in self._check)
+    
+    def get(self, k, d = None):
+        for di in reversed(self._check):
+            if k in di:
+                return di[k]
+        return d
+    
+    def __getitem__(self, key):
+        for di in reversed(self._check):
+            if k in di:
+                return di[k]
+        raise KeyError(key)
+    
+    def __setitem__(self, key, value):
+        self._check[-1][key] = value
+    
+    def snapshot(self):
+        if len(self._check) >= 20:
+            self._check_stack.append(self._check)
+            merge_snapshots = {}
+            for d in self._check:
+                merge_snapshots.update(d)
+            self._check = [merge_snapshots]
+        new_dict = {}
+        self._check.append(new_dict)
+    
+    def _pop(self):
+        last_dict = self._check.pop()
+        if self._check_stack and len(self._check) <= 1:
+            self._check = self._check_stack.pop()
+        return last_dict
+    
+    def discard_snapshot(self):
+        self._pop()
+    
+    def merge_snapshot(self):
+        last_dict = self._pop()
+        to_merge = self._check[-1]
+        if len(to_merge) < len(last_dict):
+            last_dict.update(to_merge)
+            self._check[-1] = last_dict
+        else:
+            self._check[-1].update(last_dict)
+
+
+def _customized_check(value, type_, checker, _recursive_check, _type_cache):
+    current_check, succeeded_check, failed_check, list_loop = \
+            _recursive_check
+    check_id = (id(value), id(type_))
+    if check_id in list_loop:
+        raise TypeMismatchException(value, type_)
+    current_result = checker.pre_check_type(value)
+    if current_result is None:
+        # Prevent an infinite loop
+        list_loop[check_id] = (value, type_)
+        try:
+            current_result = checker.final_check_type(
+                                value,
+                                None,
+                                lambda value, type:
+                                    _check_type_inner(
+                                        value, type, _recursive_check, _type_cache)
+                             )
+        finally:
+            del list_loop[check_id]
+    else:
+        current_check[check_id] = (current_result, value, type_)
+        # backup succedded check: it may depends on current result.
+        # If the type match fails, revert all succeeded check
+        succeeded_check.snapshot()
+        _new_recursive_check = (current_check, succeeded_check,
+            failed_check, {})
+        try:
+            checker.final_check_type(
+                value,
+                current_result,
+                lambda value, type:
+                    _check_type_inner(value, type, _new_recursive_check, _type_cache)
+            )
+        except:
+            succeeded_check.discard_snapshot()
+            raise
+        else:
+            succeeded_check.merge_snapshot()
+    return current_result
+
+
+def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None):
     # print('Check type:', value, id(value), type_, id(type_))
     if _recursive_check is None:
         # current, succeeded, failed, listloop
         # each has id-tuple as their key, and (result, value, type_) as the value.
         # we must store the used value ans types to prevent them from being collected,
         # or the ids may be reused
-        _recursive_check = ({}, {}, {}, {})
-    current_check, succeded_check, failed_check, list_loop = \
+        _recursive_check = ({}, _StackedDict(), {}, {})
+    if _type_cache is None:
+        _type_cache = {}
+    current_check, succeeded_check, failed_check, list_loop = \
             _recursive_check
     # Use (id(value), id(type)) to store matches that are done before
     check_id = (id(value), id(type_))
-    if check_id in succeded_check:
+    _succ = succeeded_check.get(check_id)
+    if _succ is not None:
         # This match is already done, return the result
-        # print('Hit succedded cache:', succeded_check[check_id],
+        # print('Hit succedded cache:', succeeded_check[check_id],
         #    id(succeeded_check[check_id]))
-        return succeded_check[check_id][0]
+        return _succ[0]
     elif check_id in failed_check:
         # This match is already failed, raise the exception
         raise failed_check[check_id][0]
@@ -1146,41 +1246,8 @@ def _check_type_inner(value, type_, _recursive_check = None):
         # itself. Return the object itself to form a recursive structure.
         return current_check[check_id][0]
     return_value = None
-    def _customized_check(checker):
-        if check_id in list_loop:
-            raise TypeMismatchException(value, type_)
-        current_result = checker.pre_check_type(value)
-        if current_result is None:
-            # Prevent an infinite loop
-            list_loop[check_id] = (value, type_)
-            try:
-                current_result = checker.final_check_type(
-                                    value,
-                                    None,
-                                    lambda value, type:
-                                        _check_type_inner(
-                                            value, type, _recursive_check)
-                                 )
-            finally:
-                del list_loop[check_id]
-        else:
-            current_check[check_id] = (current_result, value, type_)
-            # backup succedded check: it may depends on current result.
-            # If the type match fails, revert all succeeded check
-            _new_recursive_check = (current_check, dict(succeded_check),
-                failed_check, {})
-            checker.final_check_type(
-                value,
-                current_result,
-                lambda value, type:
-                    _check_type_inner(value, type, _new_recursive_check)
-            )
-            # copy succeeded checks
-            succeded_check.clear()
-            succeded_check.update(_new_recursive_check[1])
-        return current_result
     try:
-        if type_ == None:
+        if type_ is None:
             # Match None only
             if value is not None:
                 raise TypeMismatchException(value, type_)
@@ -1206,33 +1273,51 @@ def _check_type_inner(value, type_, _recursive_check = None):
                 return_value = value
             else:
                 raise TypeMismatchException(value, type_)
-        elif isinstance(type_, type):
-            if isinstance(value, type_):
-                return_value = value
-            else:
-                raise TypeMismatchException(value, type_)
-        elif isinstance(type_, tuple):
-            for subtype in type_:
-                try:
-                    return_value = _check_type_inner(
-                                        value,
-                                        subtype,
-                                        _recursive_check
-                                    )
-                except TypeMismatchException:
-                    continue
-                else:
-                    break
-            else:
-                raise TypeMismatchException(value, type_)
-        elif isinstance(type_, list):
-            return_value = _customized_check(ListChecker(type_))
-        elif isinstance(type_, dict):
-            return_value = _customized_check(DictChecker(type_))
-        elif isinstance(type_, CustomizedChecker):
-            return_value = _customized_check(type_)
         else:
-            raise InvalidTypeException(type_, "Unrecognized type")
+            type_id = id(type_)
+            if type_id in _type_cache:
+                return_value = _type_cache[type_id](value, _recursive_check, _type_cache)
+            elif isinstance(type_, type):
+                def _check_type(value, _recursive_check, _type_cache, type_ = type_):
+                    if isinstance(value, type_):
+                        return value
+                    else:
+                        raise TypeMismatchException(value, type_)
+                _type_cache[type_id] = _check_type
+                return_value = _check_type(value, _recursive_check, _type_cache)
+            elif isinstance(type_, tuple):
+                def _check_type(value, _recursive_check, _type_cache, type_ = type_):
+                    for subtype in type_:
+                        try:
+                            return _check_type_inner(
+                                                value,
+                                                subtype,
+                                                _recursive_check,
+                                                _type_cache
+                                            )
+                        except TypeMismatchException:
+                            continue
+                    else:
+                        raise TypeMismatchException(value, type_)
+                _type_cache[type_id] = _check_type
+                return_value = _check_type(value, _recursive_check, _type_cache)
+            elif isinstance(type_, list):
+                def _check_type(value, _recursive_check, _type_cache, type_ = type_, checker=ListChecker(type_)):
+                    return _customized_check(value, type_, checker, _recursive_check, _type_cache)
+                _type_cache[type_id] = _check_type
+                return_value = _check_type(value, _recursive_check, _type_cache)
+            elif isinstance(type_, dict):
+                def _check_type(value, _recursive_check, _type_cache, type_ = type_, checker=DictChecker(type_)):
+                    return _customized_check(value, type_, checker, _recursive_check, _type_cache)
+                _type_cache[type_id] = _check_type
+                return_value = _check_type(value, _recursive_check, _type_cache)
+            elif isinstance(type_, CustomizedChecker):
+                def _check_type(value, _recursive_check, _type_cache, type_ = type_):
+                    return _customized_check(value, type_, type_, _recursive_check, _type_cache)
+                _type_cache[type_id] = _check_type
+                return_value = _check_type(value, _recursive_check, _type_cache)
+            else:
+                raise InvalidTypeException(type_, "Unrecognized type")
     except Exception as exc:
         # This match fails, store the exception
         failed_check[check_id] = (exc, value, type_)
@@ -1243,8 +1328,8 @@ def _check_type_inner(value, type_, _recursive_check = None):
         # This match succeeded
         if check_id in current_check:
             del current_check[check_id]
-            # Only store the succeded_check if necessary. 
-            succeded_check[check_id] = (return_value, value, type_)
+            # Only store the succeeded_check if necessary. 
+            succeeded_check[check_id] = (return_value, value, type_)
         return return_value
 
 if __name__ == '__main__':
