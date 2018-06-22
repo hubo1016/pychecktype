@@ -6,14 +6,44 @@ try:
     from reprlib import recursive_repr
 except Exception:
     recursive_repr = lambda: lambda x: x
-    
+from copy import copy as _copy
+
 class TypeMismatchException(Exception):
     def __init__(self, value, type_, info = None):
         Exception.__init__(self, repr(value) + " cannot match type " \
             + repr(type_) + ('' if info is None else ': ' + info))
         self.value = value
         self.type = type_
+        self.info = info
+        self._path = []
+    
+    def append_path(self, part):
+        self._path.append(part)
+    
+    @property
+    def path(self):
+        return '.'.join(str(p) for p in reversed(self._path))
+    
+    def __str__(self):
+        s = Exception.__str__(self)
+        p = self.path
+        if p:
+            s = 'At ' + repr(p) + ': ' + s
+        return s
+    
+    def clone(self):
+        n = type(self)(self.value, self.type, self.info)
+        n._path = self._path[:]
+        return n
 
+
+def _append_path(call, part, *args, **kwargs):
+    try:
+        return call(*args, **kwargs)
+    except TypeMismatchException as e:
+        if part is not None:
+            e.append_path(part)
+        raise
 
 class InvalidTypeException(Exception):
     def __init__(self, type_, info = None):
@@ -34,12 +64,12 @@ class NoMatch(object):
         {"?a": NoMatch}) # doctest: +ELLIPSIS
         Traceback (most recent call last):
             ...
-        TypeMismatchException: 1 cannot match type <class '...NoMatch'>
+        TypeMismatchException: At 'a': 1 cannot match type <class '...NoMatch'>
         >>> check_type({"a": 1, "b": 2}, \
         {"a": int, "~": NoMatch}) # doctest: +ELLIPSIS
         Traceback (most recent call last):
             ...
-        TypeMismatchException: 2 cannot match type <class '...NoMatch'>
+        TypeMismatchException: At 'b': 2 cannot match type <class '...NoMatch'>
     """
     def __new__(self, *args, **kwargs):
         raise TypeError('Cannot create ' + repr(self.__name__) + \
@@ -88,9 +118,10 @@ class CustomizedChecker(object):
                                value must be the same object.
         
         :param recursive_check_type: a function
-                                     recursive_check_type(value, type)
+                                     recursive_check_type(value, type, path=None)
                                      to be called to do recursive type
-                                     check
+                                     check. When the call fails, path is automatically
+                                     joined to create a property path
         """
         raise NotImplementedError
 
@@ -171,7 +202,7 @@ def check_type(value, type):
        >>> check_type([1,2,"abc"], [int]) # doctest: +ELLIPSIS
        Traceback (most recent call last):
            ...
-       TypeMismatchException: 'abc' cannot match type <... 'int'>
+       TypeMismatchException: At '2': 'abc' cannot match type <... 'int'>
        >>> check_type("abc", [str])
        ['abc']
        >>> check_type("abc", list_([str], True)) # doctest: +ELLIPSIS
@@ -218,7 +249,7 @@ strict mode disables auto-convert-to-list for single value
        >>> check_type([1], [list]) # doctest: +ELLIPSIS
        Traceback (most recent call last):
            ...
-       TypeMismatchException: 1 cannot match type <... 'list'>
+       TypeMismatchException: At '0': 1 cannot match type <... 'list'>
        >>> check_type(1, 1)
        Traceback (most recent call last):
            ...
@@ -256,7 +287,7 @@ strict mode disables auto-convert-to-list for single value
        Traceback (most recent call last):
            ...
        TypeMismatchException: [[[...]], 1] cannot match type \
-([[...]], [([[...]], <... 'int'>)])
+([[...]], [([[...]], <... 'int'>)])...
        >>> my_type = []
        >>> my_type.append(my_type)
        >>> check_type(1, my_type)
@@ -314,7 +345,7 @@ allowed types are: <... 'collections.defaultdict'>
        >>> check_type({"abc": 1, "abd": 2, "abe": "abc"}, {"~a.*": int}) # doctest: +ELLIPSIS
        Traceback (most recent call last):
            ...
-       TypeMismatchException: 'abc' cannot match type <... 'int'>
+       TypeMismatchException: At 'abe': 'abc' cannot match type <... 'int'>
        >>> check_type({"abc": 1, "abd": 2, "abe": "abc"}, \
        {"~a.*": int, "abe": str}) == {'abc': 1, 'abd': 2, 'abe': 'abc'}
        True
@@ -325,7 +356,7 @@ allowed types are: <... 'collections.defaultdict'>
        {'abc': 1, 'def': 'abc'}
        True
        >>> check_type({"abc": 1, "abc": 2, "bcd": "abc", "bce": "abd"},
-       ... {"~a.*": int, "~b.*": str}) == \\
+       ... {"~^a.*": int, "~^b.*": str}) == \\
        ... {"abc": 1, "abc": 2, "bcd": "abc", "bce": "abd"}
        True
        >>> my_type = (str, [])
@@ -333,7 +364,7 @@ allowed types are: <... 'collections.defaultdict'>
        >>> check_type(1, my_type) # doctest: +ELLIPSIS
        Traceback (most recent call last):
            ...
-       TypeMismatchException: 1 cannot match type (<... 'str'>, [(...)])
+       TypeMismatchException: 1 cannot match type (<... 'str'>, [(...)])...
        >>> my_obj = []
        >>> my_obj.append(my_obj)
        >>> my_obj.append(1)
@@ -341,7 +372,7 @@ allowed types are: <... 'collections.defaultdict'>
        Traceback (most recent call last):
            ...
        TypeMismatchException: [[...], 1] cannot match type \
-(<... 'str'>, [(...)])
+(<... 'str'>, [(...)])...
        >>> my_obj = []
        >>> my_obj.append(my_obj)
        >>> my_obj.append("abc")
@@ -381,6 +412,30 @@ allowed types are: <... 'collections.defaultdict'>
        >>> r = _
        >>> r[0] is r[1]
        True
+       >>> check_type({"abc": {"def": "123"}}, {"abc": {"def": int}}) # doctest: +ELLIPSIS
+       Traceback (most recent call last):
+          ...
+       TypeMismatchException: At 'abc.def': '123' cannot match type <... 'int'>
+       >>> check_type({"abc": [{"def": 123}, {"def": "123"}]}, {"abc": [{"def": int}]}) # doctest: +ELLIPSIS
+       Traceback (most recent call last):
+          ...
+       TypeMismatchException: At 'abc.1.def': '123' cannot match type <... 'int'>
+       >>> check_type({"abc": [{"def": 123}, {"def": "123"}]}, ({"abc": [{"def": int}]}, {"abc": [{"def": str}]}))\
+ # doctest: +ELLIPSIS
+       Traceback (most recent call last):
+          ...
+       TypeMismatchException: {'abc': [{'def': 123}, {'def': '123'}]} cannot match type \
+({'abc': [{'def': <... 'int'>}]}, {'abc': [{'def': <... 'str'>}]}): Not matched by any of the sub types:
+         At 'abc.1.def': '123' cannot match type <... 'int'>
+         At 'abc.0.def': 123 cannot match type <... 'str'>
+       >>> check_type({"abc": 123, "def": "abc"}, map_(str, str)) # doctest: +ELLIPSIS
+       Traceback (most recent call last):
+          ...
+       TypeMismatchException: At 'abc': 123 cannot match type <... 'str'>
+       >>> check_type({"abc": {"abc": 123, 123: "abc"}}, {"abc": map_(int, str)}) # doctest: +ELLIPSIS
+       Traceback (most recent call last):
+          ...
+       TypeMismatchException: At 'abc.<Key>': 'abc' cannot match type <... 'int'>
     """
     return _check_type_inner(value, type)
 
@@ -451,8 +506,8 @@ class ListChecker(CustomizedChecker):
         else:
             subtype = self.type_[0]
             if current_result is not None:
-                current_result.extend(recursive_check_type(o, subtype)
-                                      for o in value)
+                current_result.extend(recursive_check_type(o, subtype, i)
+                                      for i,o in enumerate(value))
                 return current_result
             else:
                 return [recursive_check_type(value, subtype)]
@@ -523,11 +578,15 @@ class DictChecker(CustomizedChecker):
             for k, v in value.items():
                 if k in optional_keys:
                     current_result[k] = recursive_check_type(v,
-                            optional_keys[k])
+                                                     optional_keys[k],
+                                                     k)
                 else:
                     for rk, rv in self.regexp_keys:
                         if re.search(rk, k):
-                            current_result[k] = recursive_check_type(v, rv)
+                            current_result[k] = recursive_check_type(
+                                                        v,
+                                                        rv,
+                                                        k)
                             break
                     else:
                         current_result[k] = v
@@ -579,7 +638,7 @@ length mismatch
         ... # By default, a direct recursive is not allowed # doctest: +ELLIPSIS
         Traceback (most recent call last):
             ...
-        TypeMismatchException: [[...]] cannot match type \
+        TypeMismatchException: At '0': [[...]] cannot match type \
 tuple_([...])
         >>> t = []
         >>> tuple_type = tuple_()
@@ -640,11 +699,11 @@ and return list instead of tuple
     
     def final_check_type(self, value, current_result, recursive_check_type):
         if current_result is None:
-            return tuple(recursive_check_type(v, t)
-                         for v, t in zip(value, self.type_))
+            return tuple(recursive_check_type(v, t, i)
+                         for i, (v, t) in enumerate(zip(value, self.type_)))
         else:
-            current_result.extend(recursive_check_type(v, t)
-                                  for v, t in zip(value, self.type_))
+            current_result.extend(recursive_check_type(v, t, i)
+                                  for i, (v, t) in enumerate(zip(value, self.type_)))
             return current_result
 
 
@@ -697,8 +756,8 @@ map_(<... 'int'>, <... 'str'>): allowed types are: <... 'dict'>
         
     def final_check_type(self, value, current_result, recursive_check_type):
         current_result.update(
-                (recursive_check_type(k, self.key_type),
-                    recursive_check_type(v, self.value_type))
+                (recursive_check_type(k, self.key_type, '<Key>'),
+                    recursive_check_type(v, self.value_type, k))
                 for k, v in list(value.items())
         )
         return current_result
@@ -1188,8 +1247,8 @@ def _customized_check(value, type_, checker, _recursive_check, _type_cache):
             current_result = checker.final_check_type(
                                 value,
                                 None,
-                                lambda value, type:
-                                    _check_type_inner(
+                                lambda value, type, path=None:
+                                    _append_path(_check_type_inner, path,
                                         value, type, _recursive_check, _type_cache)
                              )
         finally:
@@ -1205,8 +1264,9 @@ def _customized_check(value, type_, checker, _recursive_check, _type_cache):
             checker.final_check_type(
                 value,
                 current_result,
-                lambda value, type:
-                    _check_type_inner(value, type, _new_recursive_check, _type_cache)
+                lambda value, type, path=None:
+                    _append_path(_check_type_inner, path,
+                        value, type, _new_recursive_check, _type_cache)
             )
         except:
             succeeded_check.discard_snapshot()
@@ -1214,6 +1274,10 @@ def _customized_check(value, type_, checker, _recursive_check, _type_cache):
         else:
             succeeded_check.merge_snapshot()
     return current_result
+
+
+def _indent(text, prepend = '  '):
+    return ''.join(prepend + l for l in text.splitlines(True))
 
 
 def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None):
@@ -1238,7 +1302,12 @@ def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None)
         return _succ[0]
     elif check_id in failed_check:
         # This match is already failed, raise the exception
-        raise failed_check[check_id][0]
+        exc = failed_check[check_id][0]
+        if isinstance(exc, TypeMismatchException):
+            exc = exc.clone()
+        else:
+            exc = _copy(exc)
+        raise exc
     elif check_id in current_check:
         # print('Hit succedded cache:', current_check[check_id],
         #    id(current_check[check_id]))
@@ -1287,6 +1356,7 @@ def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None)
                 return_value = _check_type(value, _recursive_check, _type_cache)
             elif isinstance(type_, tuple):
                 def _check_type(value, _recursive_check, _type_cache, type_ = type_):
+                    es = []
                     for subtype in type_:
                         try:
                             return _check_type_inner(
@@ -1295,10 +1365,11 @@ def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None)
                                                 _recursive_check,
                                                 _type_cache
                                             )
-                        except TypeMismatchException:
-                            continue
+                        except TypeMismatchException as e:
+                            es.append(e)
                     else:
-                        raise TypeMismatchException(value, type_)
+                        raise TypeMismatchException(value, type_,
+                                    'Not matched by any of the sub types:\n' + _indent('\n'.join(str(e) for e in es)))
                 _type_cache[type_id] = _check_type
                 return_value = _check_type(value, _recursive_check, _type_cache)
             elif isinstance(type_, list):
@@ -1320,6 +1391,8 @@ def _check_type_inner(value, type_, _recursive_check = None, _type_cache = None)
                 raise InvalidTypeException(type_, "Unrecognized type")
     except Exception as exc:
         # This match fails, store the exception
+        if isinstance(exc, TypeMismatchException):
+            exc = exc.clone()
         failed_check[check_id] = (exc, value, type_)
         if check_id in current_check:
             del current_check[check_id]
