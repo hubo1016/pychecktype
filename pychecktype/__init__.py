@@ -8,6 +8,10 @@ except Exception:
     recursive_repr = lambda: lambda x: x
 from copy import copy as _copy
 
+
+__version__ = '1.4.1'
+
+
 class TypeMismatchException(Exception):
     def __init__(self, value, type_, info = None):
         Exception.__init__(self, repr(value) + " cannot match type " \
@@ -45,10 +49,19 @@ def _append_path(call, part, *args, **kwargs):
             e.append_path(part)
         raise
 
+
 class InvalidTypeException(Exception):
     def __init__(self, type_, info = None):
         Exception.__init__(self, repr(type_) + " is not a valid type" \
             + ("" if info is None else ": " + info))
+
+
+class CheckFailedException(Exception):
+    """
+    Raise this exception in a customized checker/converter to
+    replace the default message
+    """
+    pass
 
         
 class NoMatch(object):
@@ -771,6 +784,21 @@ map_(<... 'int'>, <... 'str'>): allowed types are: <... 'dict'>
 map_ = MapChecker
 
 
+def _parse_checker(check, default_msg):
+    if check is None or callable(check):
+        return check, default_msg
+    else:
+        check_, msg_ = check
+        return check_, msg_
+
+
+def _guard_checker(value_, type_, func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except CheckFailedException as e:
+        raise TypeMismatchException(value_, type_, str(e))
+
+
 class ExtraChecker(CustomizedChecker):
     """
     Do extra checks around a basic type
@@ -790,11 +818,37 @@ class ExtraChecker(CustomizedChecker):
             ...
         TypeMismatchException: {'age': 19} cannot match type \
 extra({'age': <... 'int'>}): check returns False
+        >>> check_type({"age": 19}, extra({"age": int},
+        ... check = (lambda x: 14 < x['age'] < 18, 'invalid age'))) # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+            ...
+        TypeMismatchException: {'age': 19} cannot match type \
+extra({'age': <... 'int'>}): invalid age
         >>> e_t = extra(None, precreate = lambda x: {})
         Traceback (most recent call last):
             ...
         InvalidTypeException: extra(None) is not a valid type: \
 precreate and merge must be used together
+        >>> e_t = extra()
+        >>> e_t.bind(tuple_((str, [e_t])),
+        ...          check_before = (lambda x: len(x) >= 2, 'must have 2 items'),
+        ...          check = lambda x: len(x[1]) <= 3,
+        ...          convert_before = lambda x: x[:2],
+        ...          convert = lambda x: (x[0], x[1], len(x[1])),
+        ...          precreate = lambda x: {},
+        ...          merge = lambda c, r:
+        ...                     c.update((
+        ...                         ("name", r[0]),
+        ...                         ("children", r[1]),
+        ...                         ("childcount", r[2])
+        ...                     ))
+        ...          )
+        >>> check_type(("a",), e_t) # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+            ...
+        TypeMismatchException: ('a',) cannot match type \
+extra(tuple_((<... 'str'>, [...]))): \
+must have 2 items
         >>> e_t = extra()
         >>> e_t.bind(tuple_((str, [e_t])),
         ...          check_before = lambda x: len(x) >= 2,
@@ -873,10 +927,15 @@ check_before returns False
             
         Take care of convert_before / convert: do not break the
         recursive structure.
+        
+        check/check_before can be a callable, or a tuple(callable, message)
+        to customize the error message when check fails. You can also raises
+        an `CheckFailedException` instance to customize the error message,
+        in this case the error message will be `str(check_failed_exception)`.
         """
         self.basictype = basictype
-        self._check = check
-        self._check_before = check_before
+        self._check, self._check_msg = _parse_checker(check, 'check returns False')
+        self._check_before, self._check_before_msg = _parse_checker(check_before, 'check_before returns False')
         self._convert = convert
         self._convert_before = convert_before
         self._precreate = precreate
@@ -892,27 +951,27 @@ check_before returns False
     
     def pre_check_type(self, value):
         if self._check_before is not None:
-            if not self._check_before(value):
+            if not _guard_checker(value, self, self._check_before, value):
                 raise TypeMismatchException(value, self,
-                        "check_before returns False")
+                        self._check_before_msg)
         if self._precreate is not None:
-            return self._precreate(value)
+            return _guard_checker(value, self, self._precreate, value)
         else:
             return None
     
     def final_check_type(self, value, current_result, recursive_check_type):
         origin_value = value
         if self._convert_before is not None:
-            value = self._convert_before(value)
+            value = _guard_checker(origin_value, self, self._convert_before, value)
         r = recursive_check_type(value, self.basictype)
         if self._check is not None:
-            if not self._check(r):
+            if not _guard_checker(origin_value, self, self._check, r):
                 raise TypeMismatchException(origin_value, self,
-                        "check returns False")
+                        self._check_msg)
         if self._convert is not None:
-            r = self._convert(r)
+            r = _guard_checker(origin_value, self, self._convert, r)
         if current_result is not None:
-            self._merge(current_result, r)
+            _guard_checker(origin_value, self, self._merge, current_result, r)
             return current_result
         else:
             return r
@@ -1090,8 +1149,9 @@ check returns False
             self._recreate_object = lambda: object_type.__new__(object_type)
         else:
             self._recreate_object = None
-        self._check = check
-        self._check_before = check_before
+        self._check, self._check_msg = _parse_checker(check, 'check returns False')
+        self._check_before, self._check_before_msg = \
+                _parse_checker(check_before, 'check_before returns False')
         self._modify = modify
         self._merge = merge
     
@@ -1099,24 +1159,24 @@ check returns False
         if not isinstance(value, self.object_type):
             raise TypeMismatchException(value, self, "class type mismatch")
         if self._check_before is not None:
-            if not self._check_before(value):
+            if not _guard_checker(value, self, self._check_before, value):
                 raise TypeMismatchException(value, self,
-                        "check_before returns False")
+                        self._check_before_msg)
         if self._recreate_object is not None:
-            return self._recreate_object()
+            return _guard_checker(value, self, self._recreate_object)
         else:
             return value
     
     def final_check_type(self, value, current_result, recursive_check_type):
         d = recursive_check_type(value.__dict__, self.property_check)
         if self._merge is not None:
-            self._merge(current_result, d)
+            _guard_checker(value, self, self._merge, current_result, d)
         if self._check is not None:
-            if not self._check(current_result):
+            if not _guard_checker(value, self, self._check, current_result):
                 raise TypeMismatchException(value, self,
-                        "check returns False")
+                        self._check_msg)
         if self._modify is not None:
-            self._modify(current_result)
+            _guard_checker(value, self, self._modify, current_result)
         return current_result
         
     @recursive_repr()
